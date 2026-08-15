@@ -10,11 +10,14 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+
+	"6.5840/mr"
+)
 
 func main() {
 	if len(os.Args) != 3 {
@@ -23,7 +26,7 @@ func main() {
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
-
+	fmt.Printf("test the worker \n")
 	mr.Worker(os.Args[2], mapf, reducef)
 }
 
