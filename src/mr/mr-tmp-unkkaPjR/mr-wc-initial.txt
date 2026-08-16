@@ -1,0 +1,6 @@
+../../main/pg-being_ernest.txt 1
+../../main/pg-dorian_gray.txt 1
+../../main/pg-frankenstein.txt 1
+../../main/pg-grimm.txt 1
+../../main/pg-huckleberry_finn.txt 1
+../../main/pg-metamorphosis.txt 1
