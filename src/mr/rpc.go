@@ -33,21 +33,18 @@ type RequestTaskReply struct {
 	Type     TaskType
 	TaskID   int
 	FileName string
-	nmap     int
-	nreduce  int
+	NMap     int
+	NReduce  int
 }
 
 // ding yi report task arg
 type ReportTaskArgs struct {
-	reportId int
-	success  bool
+	TaskID  int
+	Success bool
 }
 
 // ding yi report task reply
 type ReportTaskReply struct {
-	Type    TaskType
-	TaskID  int
-	success bool
 }
 
 // Add your RPC definitions here.

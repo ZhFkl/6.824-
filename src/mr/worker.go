@@ -69,9 +69,9 @@ func executeMapTask(task RequestTaskReply, mapf func(string, string) []KeyValue)
 		return err
 	}
 	kva := mapf(task.FileName, string(content))
-	buckets := make([][]KeyValue, task.nreduce)
+	buckets := make([][]KeyValue, task.NReduce)
 	for _, kv := range kva {
-		reduceID := ihash(kv.Key) % task.nreduce
+		reduceID := ihash(kv.Key) % task.NReduce
 		buckets[reduceID] = append(buckets[reduceID], kv)
 	}
 
@@ -111,7 +111,7 @@ func readIntermediate(filename string) ([]KeyValue, error) {
 func executeReduceTask(task RequestTaskReply, reducef func(string, []string) string) error {
 	var intermediate []KeyValue
 	reduceID := task.TaskID
-	for mapID := 0; mapID < task.nmap; mapID++ {
+	for mapID := 0; mapID < task.NMap; mapID++ {
 		filename := fmt.Sprintf("mr-%d-%d", mapID, reduceID)
 
 		kva, err := readIntermediate(filename)
