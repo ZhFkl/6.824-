@@ -31,10 +31,13 @@ var coordSockName string // socket for coordinator
 // main/mrworker.go calls this function.
 func reportTask(task RequestTaskReply, success bool) {
 	args := ReportTaskArgs{
-		reportId: task.TaskID,
-		success:  success,
+		Type: task.Type,
+		ReportId: task.TaskID,
+		Success:  success,
 	}
-
+	if(task.Type == TaskReduce){
+		//fmt.Printf("汇报第 %d 个 ReduceTask \n",args.ReportId)
+	}
 	reply := ReportTaskReply{}
 	call(
 		"Coordinator.ReportTask",
@@ -105,7 +108,6 @@ func readIntermediate(filename string) ([]KeyValue, error) {
 	}
 
 	return kva, nil
-
 }
 
 func executeReduceTask(task RequestTaskReply, reducef func(string, []string) string) error {
@@ -145,7 +147,16 @@ func executeReduceTask(task RequestTaskReply, reducef func(string, []string) str
 		i = j
 	}
 	outputName := fmt.Sprintf("mr-out-%d", reduceID)
-	return atomicWrite(outputName, output.Bytes())
+	if err := atomicWrite(outputName, output.Bytes()); err != nil {
+		return err
+	}
+
+	for mapID := 0; mapID < task.NMap; mapID++ {
+		filename := fmt.Sprintf("mr-%d-%d", mapID, reduceID)
+		os.Remove(filename)
+	}
+
+	return nil
 }
 
 func Worker(sockname string, mapf func(string, string) []KeyValue,
@@ -155,6 +166,7 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	for {
+		//log.Printf("开始工作\n")
 		args := RequestTaskArgs{}
 		reply := RequestTaskReply{}
 
@@ -169,10 +181,13 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 		}
 		switch reply.Type {
 		case TaskMap:
+			//fmt.Printf("进入map环节\n")
 			err := executeMapTask(reply, mapf)
 			reportTask(reply, err == nil)
 		case TaskReduce:
+			//fmt.Printf("进入Reduce环节\n")
 			err := executeReduceTask(reply, reducef)
+			//log.Printf("Reduce—— %d 任务执行完成 开始汇报 \n",reply.TaskID)
 			reportTask(reply, err == nil)
 
 		case TaskWait:

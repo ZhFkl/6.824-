@@ -39,12 +39,15 @@ type RequestTaskReply struct {
 
 // ding yi report task arg
 type ReportTaskArgs struct {
-	TaskID  int
-	Success bool
+	Type     TaskType
+	ReportId int
+	Success  bool
 }
 
 // ding yi report task reply
 type ReportTaskReply struct {
+	TaskID  int
+	Success bool
 }
 
 // Add your RPC definitions here.
