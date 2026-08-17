@@ -31,11 +31,11 @@ var coordSockName string // socket for coordinator
 // main/mrworker.go calls this function.
 func reportTask(task RequestTaskReply, success bool) {
 	args := ReportTaskArgs{
-		Type: task.Type,
+		Type:     task.Type,
 		ReportId: task.TaskID,
 		Success:  success,
 	}
-	if(task.Type == TaskReduce){
+	if task.Type == TaskReduce {
 		//fmt.Printf("汇报第 %d 个 ReduceTask \n",args.ReportId)
 	}
 	reply := ReportTaskReply{}

@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -8,7 +9,6 @@ import (
 	"os"
 	"sync"
 	"time"
-	"fmt"
 )
 
 // zhe li hai yao ding yi task de jie gou lei xing
@@ -46,8 +46,8 @@ type Coordinator struct {
 	reduceTasks []Task
 	nmap        int
 	nreduce     int
-	nMapDone	int
-	nReduceDone int 
+	nMapDone    int
+	nReduceDone int
 	// reduce task de shu zu
 	//
 
@@ -58,7 +58,6 @@ type Coordinator struct {
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server(sockname string) {
@@ -80,27 +79,26 @@ func (c *Coordinator) Done() bool {
 	return c.phase == DonePhase
 }
 
-
 // han shu RequestTask
-func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error{
-	// pan duan ci shi you mei you sheng yu de task 
+func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	// pan duan ci shi you mei you sheng yu de task
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// ci shi na shang suo , wei shen me yao you suo ? yin wei ci shi ru guo kai le hen duo ge workder
-	// xian cheng na me ci shi dui yi done de zhe ge task de num jiu shi yige jing zheng guan xi 
+	// xian cheng na me ci shi dui yi done de zhe ge task de num jiu shi yige jing zheng guan xi
 	switch c.phase {
-		// pan duan zhe li shi map phase hai shi reduce phase
+	// pan duan zhe li shi map phase hai shi reduce phase
 
 	case MapPhase:
-		// ru guo ci shi shi mappahse zen me ban ? 
-		// shou xian shi pan duan ci shi yao bu yao qie huan zhuang tai 
-		// shen me jiao zuo qie huan zhuang tai jiu shi cong ci shi de map phase ran hou 
-		// qie huan cheng ci shid e reduce zhuang tai 
+		// ru guo ci shi shi mappahse zen me ban ?
+		// shou xian shi pan duan ci shi yao bu yao qie huan zhuang tai
+		// shen me jiao zuo qie huan zhuang tai jiu shi cong ci shi de map phase ran hou
+		// qie huan cheng ci shid e reduce zhuang tai
 
-		// done == nmapnum jiu shi qie huan 
+		// done == nmapnum jiu shi qie huan
 		for i := range c.mapTasks {
-			if c.mapTasks[i].State == Idle{
+			if c.mapTasks[i].State == Idle {
 				c.mapTasks[i].State = Running
 				c.mapTasks[i].StartTime = time.Now()
 				reply.Type = TaskMap
@@ -113,17 +111,17 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			}
 		}
 
-		if c.nMapDone == c.nmap{
+		if c.nMapDone == c.nmap {
 			c.phase = ReducePhase
 			//log.Printf("进入到Reduce阶段\n")
-		}else{
+		} else {
 			reply.Type = TaskWait
 			return nil
 		}
 		fallthrough
-		
+
 	case ReducePhase:
-		// zhao dao kong xian de reduce ren wu 
+		// zhao dao kong xian de reduce ren wu
 		for i := range c.reduceTasks {
 			if c.reduceTasks[i].State == Idle {
 				c.reduceTasks[i].State = Running
@@ -137,17 +135,16 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				return nil
 			}
 		}
-		// ru guo mei zhao dao na me ci shi jiu dai biao le suo you ren wu yi jing fen pei wan cheng 
-		// zhi hou jiu dneg dai jiu xinig le 
+		// ru guo mei zhao dao na me ci shi jiu dai biao le suo you ren wu yi jing fen pei wan cheng
+		// zhi hou jiu dneg dai jiu xinig le
 		if c.nReduceDone == c.nreduce {
 			c.phase = DonePhase
 			reply.Type = TaskExit
 			return nil
 		}
 		// 还有 reduce 在运行，让 worker 等待
-		reply.Type = TaskExit
+		reply.Type = TaskWait
 		return nil
-
 
 	case DonePhase:
 		reply.Type = TaskExit
@@ -159,27 +156,27 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 
 // func ReportTask
 
-func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply)	error {
-	// ci shi shi worker lai hui bao ci shi de task you mei you wan cheng 
+func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) error {
+	// ci shi shi worker lai hui bao ci shi de task you mei you wan cheng
 	// tong guo reporttask reportreply
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if args.Type == TaskMap{
+	if args.Type == TaskMap {
 
-		if args.ReportId >= 0 && args.ReportId < c.nmap && c.mapTasks[args.ReportId].State == Running{
-			if args.Success{
+		if args.ReportId >= 0 && args.ReportId < c.nmap && c.mapTasks[args.ReportId].State == Running {
+			if args.Success {
 				c.mapTasks[args.ReportId].State = Finished
 				c.nMapDone++
 				//log.Printf("完成了一个第 %d 个map 任务\n",c.nMapDone)
-			}else {
+			} else {
 				c.mapTasks[args.ReportId].State = Idle
 			}
 		}
 
-	}else if args.Type == TaskReduce{
+	} else if args.Type == TaskReduce {
 
-		if args.ReportId >= 0 && args.ReportId < c.nreduce && c.reduceTasks[args.ReportId].State == Running{
+		if args.ReportId >= 0 && args.ReportId < c.nreduce && c.reduceTasks[args.ReportId].State == Running {
 			if args.Success {
 				c.reduceTasks[args.ReportId].State = Finished
 				c.nReduceDone++
@@ -190,26 +187,25 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply)	e
 		}
 	}
 
-
-
 	return nil
 }
-// func to check if the task if overtime 
 
-func (c *Coordinator) checkTimeout(){
-	for{
+// func to check if the task if overtime
+
+func (c *Coordinator) checkTimeout() {
+	for {
 		time.Sleep(5 * time.Second)
 		c.mu.Lock()
 		now := time.Now()
 
-		if(c.phase == MapPhase || c.phase == ReducePhase){
+		if c.phase == MapPhase || c.phase == ReducePhase {
 			tasks := c.mapTasks
-			if(c.phase == ReducePhase){
+			if c.phase == ReducePhase {
 				tasks = c.reduceTasks
 			}
 
-			for i := range tasks{
-				if tasks[i].State == Running && now.Sub(tasks[i].StartTime) > 10 * time.Second{
+			for i := range tasks {
+				if tasks[i].State == Running && now.Sub(tasks[i].StartTime) > 10*time.Second {
 					tasks[i].State = Idle
 				}
 			}
@@ -229,11 +225,9 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 		nreduce:     nReduce,
 		mapTasks:    make([]Task, len(files)),
 		reduceTasks: make([]Task, nReduce),
-		nMapDone:	 0,
+		nMapDone:    0,
 		nReduceDone: 0,
 	}
-
-	
 
 	log.Printf("finish the coordinator make\n")
 	// wan cheng ci shi de chu shi hua
@@ -252,11 +246,9 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 		}
 	}
 	////log.Printf("finish the reducetask init\n")
-	fmt.Printf("一共有 %d 个map 任务， 有 %d 个reduce 任务\n",c.nmap,c.nreduce)
+	fmt.Printf("一共有 %d 个map 任务， 有 %d 个reduce 任务\n", c.nmap, c.nreduce)
 	// Your code here.
 	go c.checkTimeout()
 	c.server(sockname)
 	return &c
 }
-
-
