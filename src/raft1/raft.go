@@ -9,11 +9,13 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -31,6 +33,12 @@ const (
 type LogEntry struct {
 	Term    int
 	Command interface{}
+}
+
+type PersistentState struct {
+	Term    int
+	VoteFor int
+	Log     []LogEntry
 }
 
 // A Go object implementing a single Raft peer.
@@ -94,6 +102,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	state := PersistentState{
+		Term:    rf.term,
+		VoteFor: rf.voteFor,
+		Log:     rf.log,
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(state) != nil {
+		return
+	}
+
+	rf.persister.Save(w.Bytes(), nil)
+
 }
 
 // restore previously persisted state.
@@ -114,6 +135,17 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var state PersistentState
+	if d.Decode(&state) != nil {
+		return
+	}
+	rf.term = state.Term
+	rf.log = state.Log
+	rf.voteFor = state.VoteFor
+
 }
 
 // how many bytes in Raft's persisted log?
@@ -162,6 +194,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 // example RequestVote RPC handler.
@@ -176,11 +211,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.term {
 		return
 	}
-
+	persistentChanged := false
 	if args.Term > rf.term {
 		rf.term = args.Term
 		rf.voteFor = -1
 		rf.state = Follower
+		persistentChanged = true
 	}
 
 	reply.Term = rf.term
@@ -199,15 +235,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastContact = time.Now()
 		rf.electionTimeout = randomElectionTimeout()
 		reply.VoteGranted = true
+		persistentChanged = true
+	}
+
+	if persistentChanged {
+		rf.persist()
 	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	persistentChanged := false
+	defer func() {
+		if persistentChanged {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+	}()
 
 	reply.Term = rf.term
 	reply.Success = false
+	reply.XTerm = -1
+	reply.XIndex = -1
+	reply.XLen = len(rf.log)
 	if args.Term < rf.term {
 		return
 	}
@@ -215,6 +265,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.term {
 		rf.term = args.Term
 		rf.voteFor = -1
+		persistentChanged = true
 	}
 
 	rf.state = Follower
@@ -223,10 +274,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.term
 
 	if args.PrevLogIndex >= len(rf.log) {
+		reply.Term = -1
+		reply.XLen = len(rf.log)
 		return
 	}
 
 	if rf.log[args.PrevLogIndex].Term != args.PrevlogTerm {
+		conflictTerm := rf.log[args.PrevLogIndex].Term
+		firstIndex := args.PrevLogIndex
+
+		for firstIndex > 0 && rf.log[firstIndex-1].Term == conflictTerm {
+			firstIndex--
+		}
+
+		reply.XTerm = conflictTerm
+		reply.XIndex = firstIndex
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -236,6 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		localIndex := insertIndex + entryIndex
 		if rf.log[localIndex].Term != args.Entries[entryIndex].Term {
 			rf.log = rf.log[:localIndex]
+			persistentChanged = true
 			break
 		}
 		entryIndex++
@@ -244,6 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// zhe li jiu ke yi cong entryIndex ba zhe xie dong xi cha ru jin qu le
 	if entryIndex < len(args.Entries) {
 		rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		persistentChanged = true
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -363,6 +428,7 @@ func (rf *Raft) replicateToPeer(server int) {
 			rf.voteFor = -1
 			rf.lastContact = time.Now()
 			rf.electionTimeout = randomElectionTimeout()
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -382,10 +448,43 @@ func (rf *Raft) replicateToPeer(server int) {
 			rf.advanceCommitIndexLocked()
 			rf.mu.Unlock()
 			return
-		}
+		} else {
+			newNext := reply.XLen
 
-		if rf.nextIndex[server] == next && next > 1 {
-			rf.nextIndex[server]--
+			if reply.XTerm != -1 {
+				lastIndexWithTerm := -1
+				for index := len(rf.log) - 1; index >= 0; index-- {
+					if rf.log[index].Term == reply.Term {
+						lastIndexWithTerm = index
+						break
+					}
+				}
+
+				if lastIndexWithTerm != -1 {
+					newNext = lastIndexWithTerm + 1
+				} else {
+					newNext = reply.XIndex
+				}
+			}
+			if newNext < 1 {
+				newNext = 1
+			}
+
+			if newNext > len(rf.log) {
+				newNext = len(rf.log)
+			}
+
+			minNext := rf.matchIndex[server] + 1
+			if newNext < minNext {
+				newNext = minNext
+			}
+
+			if rf.nextIndex[server] == next {
+				rf.nextIndex[server] = newNext
+			}
+
+			rf.mu.Unlock()
+			continue
 		}
 
 		rf.mu.Unlock()
@@ -445,7 +544,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// geng xin matchIndex
 
 	// broadecast
-
+	rf.persist()
 	rf.mu.Unlock()
 	go rf.broadcastAppendEntries()
 	return index, term, true
@@ -487,6 +586,8 @@ func (rf *Raft) startElection() {
 	rf.voteFor = rf.me
 	rf.electionTimeout = randomElectionTimeout()
 	rf.lastContact = time.Now()
+
+	rf.persist()
 	votes := 1
 	electionTerm := rf.term
 	majority := len(rf.peers)/2 + 1
@@ -531,6 +632,7 @@ func (rf *Raft) startElection() {
 				rf.voteFor = -1
 				rf.lastContact = time.Now()
 				rf.electionTimeout = randomElectionTimeout()
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
