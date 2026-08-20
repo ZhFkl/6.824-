@@ -145,4 +145,47 @@ part2：lock
 
             time.Sleep(10 * time.Millisecond)
         }
+## lab3 raft 协议
+### partA
+    首先介绍一下raft协议， 就是一个同步机制就是此时有一群机器，这群机器中存在选定此时的leader和follower。
+    leader需要定期给follower发送消息，如果过了一段时间此时没有收到那么机器就会进行进一步的选举重新选举出来一个leader其余的机器自动分配维对应的follower
+    主要函数
+    1.Make构造此时的raft
+    2.tick， 定期的检查
+    leader需要定期的给所有机器发送信息确认leader还活着
+    follower需要定期的判断此时leader死了没， 如果死了就要进行选举成为新的leader来管理follower
+
+
+    数据结构：
+    type Raft struct {
+	mu                sync.Mutex          // Lock to protect shared access to this peer's state
+	peers             []*labrpc.ClientEnd // RPC end points of all peers 记录此时的机器然后遍历发信息
+	persister         *tester.Persister   // Object to hold this peer's persisted state
+	me                int                 // this peer's index into peers[]
+	state             StateType           //判断是leader还是follower
+	lastContact       time.Time            对于follower来说上次收到消息的时间
+	lastHeartbeat     time.Time             对于leader来说上次发消息的时间
+	electionTimeout   time.Duration         选举间隔如果现在的时间 - 上次发消息的时间超过这个值那么此时就重新开始选举
+	heartbeatInterval time.Duration         leader给follower发消息的时间间隔
+	term              int                   第几次选举，主要用来在不同的raft之间进行同步，永远同步到最高的选举
+                                            因为很多时候会出现响应的丢失导致部分不能同步
+	voteFor           int                   选举的时候进行投票
+	// Your data here (3A, 3B, 3C).
+	// Look at the paper's Figure 2 for a description of what
+	// state a Raft server must maintain.
+	// zhe li wo hai xu yao jia zai shen me lei xing de shu ju jie gou
     }
+
+    func (rf *Raft) startElection()         
+    //开始进行选举的内部函数 进入到选举状态更自己的raft的变量term++进入到引得一轮选举
+    然后给每一个线程发送requestvote 来让他们给自己投票，如果他们版本比自己高那么就同步并追随新的leader，
+    或者统计此时的票数然后竞争leader， 如果此时 大于半数， 那么此时自己成为leader，然后后就能通过sendHeartbeats来让所有人同步
+    如果别人的term > me那么此时我的leader就不成立， 如果别人和我同样，或者比我小， 那么此时就同步别人的term然后更新别人的lastheartbeattime和随机的时间
+    func (rf *Raft) sendHeartbeats()
+    对于leader来说此时相当于给每一个raft发送tick也就是心跳功能
+    func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
+    给raft发送对应的心跳的具体功能实现
+    func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply)
+    给raft放松此时投票的具体实现。 如果此时我的term > 选举， 那么此时就同步别人term如果此时候选人的term 》 me 那么此时就该我的
+    term然后给他投票， 并且标记已经投票了 
+  
