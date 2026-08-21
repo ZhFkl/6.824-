@@ -427,3 +427,107 @@ make RUN="-run 3B" raft1   # 日志复制
 make RUN="-run 3C" raft1   # 持久化（多跑几遍，带 -race）
 make RUN="-run 3D" raft1   # 快照（第一个测试只测截断，后面才测 InstallSnapshot）
 ```
+## lab4 KVraft（在 Raft 上构建容错 KV 服务）
+
+### 1. 整体架构
+
+在 lab3 的 raft 协议之上构建 lab2 的 KV 服务，关键是引入了一个**中间层 RSM（replicated state machine）**做粘合。分层结构：
+
+```
+Clerk（client）
+   │  RPC：KVServer.Get / KVServer.Put
+   ▼
+KVServer —— 实现 StateMachine 接口（DoOp / Snapshot / Restore）
+   │  kv.rsm.Submit(args)
+   ▼
+RSM —— 中间层：把"执行一个操作"翻译成"让 raft 提交一条日志"，再等结果
+   │  rf.Start(op)          ▲ 提交后经 applyCh 送回来
+   ▼                        │
+Raft（lab3 的成果）──────────┘
+```
+
+各层职责：
+
+- **Clerk**：记住上次成功的 leader、失败后轮换重试、维护 ErrMaybe 语义（和 lab2 一样）；
+- **KVServer**：纯业务逻辑（`map[string]valueEntry` + version 乐观锁），完全不碰复制；
+- **RSM**：向上通过 `StateMachine` 接口调用 KV 的函数，向下持有 `rf` 驱动 raft；
+- **Raft**：只负责让所有副本对"操作的顺序"达成一致，不理解命令内容。
+
+**关键理解**：RSM 这层抽象的意义是**解耦**——KV 不需要懂 raft，raft 也不需要懂 KV。`StateMachine` 接口就是两层之间的合同：
+
+```go
+type StateMachine interface {
+	DoOp(any) any   // 执行一个操作（Get/Put 的具体逻辑）
+	Snapshot() []byte // 把当前状态序列化成快照
+	Restore([]byte)   // 从快照恢复状态
+}
+```
+
+任何实现了这三个函数的服务都能架到 raft 上。这就是为什么"结构体包含另一个结构体就能互相调用"——KVServer 里嵌 `rsm`（向下提交），RSM 里存 `sm`（向上回调）。
+
+### 2. 一次 Put/Get 的完整流程（向下）
+
+1. client 发 RPC 到它认为的 leader 的 `KVServer.Get/Put`；
+2. server 把 args 原样交给 `rsm.Submit(args)`；
+3. Submit 生成 `Op{ID: 随机数, Request: args}`，调 `rf.Start(op)`：
+   - 不是 leader → 直接返回 `ErrWrongLeader`；
+   - 是 leader → 在 `waiter map[index]` 里登记 `{OpID, channel}`，阻塞等结果；
+4. raft 把 op 复制到多数派、提交，各副本（包括 leader 自己）的 applyCh 收到这条日志；
+5. RSM 的 `reader()` goroutine 从 applyCh 读到这条命令 → 调 `sm.DoOp(op.Request)` **真正执行** → 结果经 channel 通知等待中的 Submit；
+6. Submit 拿到结果 → server 填进 reply 返回 client。
+
+**纠正之前笔记里的顺序错误**：不是"rsm 先判断能不能 put/get 再调用 raft"——版本检查、key 存不存在这些业务判断全部发生在第 5 步的 `DoOp` 里，**在 raft 提交之后**。"先对顺序达成一致，再执行"是复制状态机的核心：所有副本先约定好"第 N 条命令是什么"，然后各自执行同一条，状态自然一致。执行前不做任何预判断。
+
+### 3. Submit 为什么要等得这么小心（ErrWrongLeader 的三种来源）
+
+提交的 op 和最终在那个 index 上提交的 op **不一定是同一个**——等待期间可能发生了换届：
+
+1. `rf.Start` 时自己就不是 leader → 立刻 `ErrWrongLeader`；
+2. 等待期间丢了 leader（Submit 里每 50ms 查一次 `GetState`，term 变了或不再是 leader）→ `ErrWrongLeader`；
+3. 那个 index 上提交出来的 `OpID` 不是我的 → 我丢 leader 期间别人当选，我的 op 被新 leader 的条目**覆盖**了（`notifyWaiter` 里比对 OpID）→ `ErrWrongLeader`。
+
+client 收到 `ErrWrongLeader` 就换下一个 server 重试（`ck.leader = (server+1) % len(servers)`，成功时记住这个 leader 下次直接找它）。
+
+### 4. 快照（lab3 partD 的衔接）
+
+- **触发**：`reader()` 每应用一条命令就检查一次：`rf.PersistBytes() >= maxraftstate` → `sm.Snapshot()`（KVServer 用 labgob 把整个 map 序列化）→ `rf.Snapshot(index, data)`；
+- **重启恢复**：`MakeRSM` 启动时 `persister.ReadSnapshot()` → `sm.Restore(data)`；
+- **InstallSnapshot 到达**：applyCh 上出现 `SnapshotValid` 消息 → `reader()` 调 `sm.Restore`（只接受比 `appliedIndex` 更新的快照，旧的跳过）。
+
+### 5. lab2 → lab4：同一套业务逻辑的"平移"
+
+`DoOp` 里的 Get/Put 版本检查和 lab2 的 server **几乎一字未改**——这就是分层的威力：
+
+- lab2 的版本乐观锁、ErrMaybe 语义**原样复用**（Put 第一次收到 ErrVersion 就是真失败，重传后收到就是 ErrMaybe）；
+- 新增的问题只有两个：请求可能发到**非 leader**（`ErrWrongLeader`，换一台重试）、重试可能落到**不同副本**（version 机制照样兜住，因为所有副本执行的是同一份日志）；
+- **纠正：lab4 的目的不是"面对高并发"，是容错**——挂掉少数几台服务器，服务照常运转。代价是写操作反而变慢了（每次都要多数派确认）。可靠性从来不是没有成本的。
+
+---
+
+## 全部 lab 总结
+
+四个 lab 是一条完整的递进线，每个 lab 解决分布式系统的一个核心问题：
+
+| Lab | 主题 | 解决的问题 | 核心机制 | 留下了什么"单点" |
+|---|---|---|---|---|
+| lab1 MapReduce | 分 | 怎么把大计算拆到多台机器（并行换速度） | Master-Worker、任务幂等重跑 | Master 挂了全挂 |
+| lab2 KV 单机 | 通信语义 | 网络丢包重传导致重复请求，怎么保证恰好一次 | version 乐观锁、ErrMaybe | server 挂了全挂 |
+| lab3 Raft | 复制 | 多台机器怎么对同一份日志达成一致（冗余换可靠） | leader、term、多数派、日志 | —（少数机器挂了无所谓）|
+| lab4 KVraft | 组装 | 怎么把单机服务升级成容错服务 | 分层 + StateMachine 接口 + applyCh | — |
+
+一句话版本：**lab1 解决"算得快"，lab2 解决"说得清"（RPC 语义），lab3 解决"挂不了"（共识复制），lab4 把三者拼成一个完整可用的容错 KV 服务。**
+
+几个贯穿始终的思想：
+
+1. **分层 + 窄接口**：每层只干一件事，层间用窄接口沟通（lab1 的 RPC 任务协议、lab2 的 Get/Put、lab3 的 `Start/applyCh`、lab4 的 `StateMachine` 三函数）。接口定好了，层与层可以独立替换——lab2 的 KV 原封不动架到 lab3 的 raft 上就是最好的证明；
+2. **确定性换一致性**：不直接同步"结果"（分叉了没法合并），而是同步"输入的顺序"，各自确定性执行，结果自然一致（MapReduce 的幂等任务、Raft 的日志复制都是这个思路）；
+3. **多数派原则**：任何关键决定都要多数派同意，于是少数机器挂了既不影响服务、也不会丢已确认的数据；
+4. **容错没有免费的午餐**：lab4 比 lab2 慢（每次写都要多数派确认），还引入了 ErrWrongLeader 这类新的失败模式——可靠性是用性能和复杂度换来的。
+
+### 关于软件设计的感悟（原始笔记整理）
+
+做分布式很像做建筑设计，收获最大的几点：
+
+1. **先架构后代码**：先想清楚有哪些功能、每个功能在哪里实现、据此划分哪些模块、模块之间怎么沟通（进程间用什么通信、选什么存储），再动手写；
+2. **先接口后实现**：每一层给上层/下层提供什么接口先定死，框架搭好再填内部实现（StateMachine 接口就是活例子）；
+3. **实现时两个权衡**：稳定性（按模块功能选语言、选容错策略）和效率（选合适的算法）——而这两者经常互相矛盾，架构的价值就在于把这种权衡摆到明处来做。
