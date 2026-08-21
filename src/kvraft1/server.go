@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 
 	"6.5840/kvraft1/rsm"
@@ -13,6 +14,10 @@ import (
 type valueEntry struct {
 	Value   string
 	Version rpc.Tversion
+}
+
+type SnapshotData struct {
+	Data map[string]valueEntry
 }
 
 type KVServer struct {
@@ -76,11 +81,45 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	/*
+		zhe li de snapshot shi jiu shi tong guo ci shi de rsm lai diao yong
+		ran hou ba xian zai de log ya suo cheng wei yi ge []byte de yi ge shuzu
+		jiu shi ci shi de snapshot de lei xing ran hou fan hui
+
+	*/
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	data := SnapshotData{
+		Data: kv.data,
+	}
+
+	var buf bytes.Buffer
+	enc := labgob.NewEncoder(&buf)
+	if err := enc.Encode(data); err != nil {
+		panic(err)
+	}
+
+	return buf.Bytes()
+
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	if len(data) == 0 {
+		return
+	}
+	var snapshot SnapshotData
+	dec := labgob.NewDecoder(bytes.NewBuffer(data))
+	if err := dec.Decode(&snapshot); err != nil {
+		panic(err)
+	}
+
+	if snapshot.Data == nil {
+		snapshot.Data = make(map[string]valueEntry)
+	}
+	kv.mu.Lock()
+	kv.data = snapshot.Data
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {

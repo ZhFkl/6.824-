@@ -52,49 +52,76 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	waiter       map[int]waiter
+
+	appliedIndex int
 	// Your definitions here.
+}
+
+func (rsm *RSM) notifyWaiter(index int, op Op, result any) {
+	rsm.mu.Lock()
+
+	w, exists := rsm.waiter[index]
+	if exists {
+		delete(rsm.waiter, index)
+	}
+
+	rsm.mu.Unlock()
+
+	if !exists {
+		return
+	}
+
+	if w.OpID != op.ID {
+		w.Ch <- submitResult{
+			OpID: w.OpID,
+			Err:  rpc.ErrWrongLeader,
+		}
+		return
+	}
+	w.Ch <- submitResult{
+		OpID:  op.ID,
+		Value: result,
+		Err:   rpc.OK,
+	}
+
+}
+
+func (rsm *RSM) maybeSnapshot(index int) {
+	if rsm.maxraftstate == -1 {
+		return
+	}
+
+	if rsm.rf.PersistBytes() < rsm.maxraftstate {
+		return
+	}
+
+	data := rsm.sm.Snapshot()
+	rsm.rf.Snapshot(index, data)
 }
 
 func (rsm *RSM) reader() {
 	for msg := range rsm.applyCh {
-		if !msg.CommandValid {
-			continue
-		}
+		if msg.CommandValid && msg.CommandIndex > rsm.appliedIndex {
 
-		op, ok := msg.Command.(Op)
-		if !ok {
-			continue
-		}
-
-		value := rsm.sm.DoOp(op.Request)
-
-		rsm.mu.Lock()
-		w, exists := rsm.waiter[msg.CommandIndex]
-		if !exists {
-			rsm.mu.Unlock()
-			continue
-		}
-
-		delete(rsm.waiter, msg.CommandIndex)
-
-		var result submitResult
-
-		if w.OpID == op.ID {
-			result = submitResult{
-				OpID:  op.ID,
-				Value: value,
-				Err:   rpc.OK,
+			op, ok := msg.Command.(Op)
+			if !ok {
+				continue
 			}
-		} else {
-			result = submitResult{
-				OpID: w.OpID,
-				Err:  rpc.ErrWrongLeader,
-			}
+			value := rsm.sm.DoOp(op.Request)
+			rsm.appliedIndex = msg.CommandIndex
+			rsm.notifyWaiter(msg.CommandIndex, op, value)
+
+			rsm.maybeSnapshot(msg.CommandIndex)
 		}
 
-		rsm.mu.Unlock()
-
-		w.Ch <- result
+		if msg.SnapshotValid {
+			if msg.SnapshotIndex <= rsm.appliedIndex {
+				continue
+			}
+			rsm.sm.Restore(msg.Snapshot)
+			rsm.appliedIndex = msg.SnapshotIndex
+			continue
+		}
 
 	}
 
@@ -122,7 +149,12 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 		waiter:       make(map[int]waiter),
+		appliedIndex: 0,
 	}
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		rsm.sm.Restore(snapshot)
+	}
+
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
